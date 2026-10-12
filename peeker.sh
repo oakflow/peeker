@@ -6,6 +6,28 @@ GREEN=$'\033[32m'
 YELLOW=$'\033[33m'
 RED=$'\033[31m'
 
+case "$1" in
+    -h|--help|help)
+        cat <<EOF
+Usage: peek [command] [options]
+
+Commands:
+  sys            system info (OS, hostname, uptime)
+  mem            memory usage and top processes
+  net            network info (IP, gateway, up/down speed)
+  git            git status for the current repo
+  (none)         show everything above
+
+Options:
+  -x             show extra detail (mem only)
+  <number>       set an exact process-list count (mem only)
+  -h, --help     show this help message
+  
+EOF
+        exit 0
+        ;;
+esac
+
 cat <<'EOF'
 
           '||'''|,               '||
@@ -233,7 +255,7 @@ case "$1" in
     git)
         gitstatus | sed 's/^/    /'
         ;;
-        
+
     "" | *)
         sys | sed 's/^/    /'
         echo ""
