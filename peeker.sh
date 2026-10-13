@@ -1,28 +1,57 @@
 #!/usr/bin/env bash
 
-BOLD=$'\033[1m'
-RESET=$'\033[0m'
-GREEN=$'\033[32m'
-YELLOW=$'\033[33m'
-RED=$'\033[31m'
+# --no-color can appear anywhere in the args, strip it out before anything
+# else looks at $1/$2 so it doesn't collide w subcommand/-x/count parsing
+
+NO_COLOR_FLAG=false
+args=()
+
+for arg in "$@"; do
+    if [ "$arg" = "--no-color" ]; then
+        NO_COLOR_FLAG=true
+    else
+        args+=("$arg")
+    fi
+done
+set -- "${args[@]}"
+
+
+if [ -n "$NO_COLOR" ] || $NO_COLOR_FLAG; then
+    BOLD=''
+    RESET=''
+    GREEN=''
+    YELLOW=''
+    RED=''
+else
+    BOLD=$'\033[1m'
+    RESET=$'\033[0m'
+    GREEN=$'\033[32m'
+    YELLOW=$'\033[33m'
+    RED=$'\033[31m'
+fi
+
 
 case "$1" in
     -h|--help|help)
         cat <<EOF
-Usage: peek [command] [options]
+        
+${BOLD}Usage${RESET}: 
+  peek [command] [options]
 
-Commands:
+${BOLD}Commands${RESET}:
   sys            system info (OS, hostname, uptime)
   mem            memory usage and top processes
   net            network info (IP, gateway, up/down speed)
+  disk           free/used space per fixed drive
   git            git status for the current repo
   (none)         show everything above
 
-Options:
+${BOLD}Options${RESET}:
   -x             show extra detail (mem only)
   <number>       set an exact process-list count (mem only)
+  --no-color     disable colored output (also respects the NO_COLOR env var)
   -h, --help     show this help message
-  
+
 EOF
         exit 0
         ;;
@@ -123,24 +152,35 @@ fetch_processes() {
     MSYS_NO_PATHCONV=1 tasklist /FO CSV /NH | sed 's/\([0-9]\),\([0-9]\)/\1\2/g'
 }
 
+fetch_disk() {
+    powershell -NoProfile -Command '
+Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
+    "{0}|{1}|{2}" -f $_.DeviceID, $_.Size, $_.FreeSpace
+}
+' | tr -d '\r'
+}
+
 # only kick off the data gathering a given view actually needs, and run it
 # all concurrently instead of waiting on each powershell call one at a time
 need_sys=false
 need_mem=false
 need_net=false
+need_disk=false
 
 case "$1" in
     sys) need_sys=true ;;
     mem) need_mem=true ;;
     net) need_net=true ;;
+    disk) need_disk=true ;;
     git) : ;;
-    *) need_sys=true; need_mem=true; need_net=true ;;
+    *) need_sys=true; need_mem=true; need_net=true; need_disk=true ;;
 esac
 
 pids=()
 $need_mem && { fetch_mem > "$WORKDIR/mem" & pids+=($!); fetch_processes > "$WORKDIR/proc" & pids+=($!); }
 $need_sys && { fetch_sys > "$WORKDIR/sys" & pids+=($!); }
 $need_net && { fetch_net > "$WORKDIR/net" & pids+=($!); }
+$need_disk && { fetch_disk > "$WORKDIR/disk" & pids+=($!); }
 
 [ ${#pids[@]} -gt 0 ] && wait "${pids[@]}" 2>/dev/null
 
@@ -184,6 +224,10 @@ if $need_net; then
     IFS='|' read -r netIp netGw netRx netTx < "$WORKDIR/net"
 fi
 
+if $need_disk; then
+    diskInfo=$(cat "$WORKDIR/disk")
+fi
+
 sys() {
     echo "${BOLD}SYSTEM${RESET}"
     echo "Computer: $(hostname)"
@@ -216,6 +260,33 @@ network() {
     echo "Down: ${rxKb} KB/s   Up: ${txKb} KB/s"
 }
 
+disk() {
+    echo "${BOLD}DISK${RESET}"
+    while IFS='|' read -r letter totalBytes freeBytes; do
+        [ -z "$letter" ] && continue
+        usedBytes=$((totalBytes - freeBytes))
+        pct=$((usedBytes * 100 / totalBytes))
+
+        totalGb=$(awk -v v="$totalBytes" 'BEGIN{printf "%.1f", v/1073741824}')
+        freeGb=$(awk -v v="$freeBytes" 'BEGIN{printf "%.1f", v/1073741824}')
+        usedGb=$(awk -v v="$usedBytes" 'BEGIN{printf "%.1f", v/1073741824}')
+
+        diskColor=$GREEN
+        [ "$pct" -ge 60 ] && diskColor=$YELLOW
+        [ "$pct" -ge 85 ] && diskColor=$RED
+
+        diskFilled=$((barLength * pct / 100))
+        diskEmpty=$((barLength - diskFilled))
+
+        echo "${letter} ${usedGb}/${totalGb} GB used (${pct}%)"
+        printf '%s' "$diskColor"
+        printf '%*s' $diskFilled '' | tr ' ' '#'
+        printf '%*s' $diskEmpty '' | tr ' ' '-'
+        printf '%s' "$RESET"
+        echo ""
+    done <<< "$diskInfo"
+}
+
 gitstatus() {
     echo "${BOLD}GIT${RESET}"
     if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -225,9 +296,9 @@ gitstatus() {
     local branch staged unstaged untracked statusWord statusColor last
     branch=$(git branch --show-current)
     [ -z "$branch" ] && branch="detached"
-    staged=$(git diff --cached --name-only | wc -l | tr -d ' ')
-    unstaged=$(git diff --name-only | wc -l | tr -d ' ')
-    untracked=$(git ls-files --others --exclude-standard | wc -l | tr -d ' ')
+    staged=$(git diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')
+    unstaged=$(git diff --name-only 2>/dev/null | wc -l | tr -d ' ')
+    untracked=$(git ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')
     if [ $((staged + unstaged + untracked)) -eq 0 ]; then
         statusWord="CLEAN"
         statusColor=$GREEN
@@ -252,6 +323,9 @@ case "$1" in
     net)
         network | sed 's/^/    /'
         ;;
+    disk)
+        disk | sed 's/^/    /'
+        ;;
     git)
         gitstatus | sed 's/^/    /'
         ;;
@@ -262,6 +336,8 @@ case "$1" in
         mem | sed 's/^/    /'
         echo ""
         network | sed 's/^/    /'
+        echo ""
+        disk | sed 's/^/    /'
         echo ""
         gitstatus | sed 's/^/    /'
         ;;
