@@ -24,7 +24,7 @@ $ peek
     ############--------
 
     TOP PROCESSES
-    chrome.exe (24)                                    1842.3 MB
+    chrome.exe (24)                              1842.3 MB
     ...
 
     NETWORK
@@ -39,7 +39,7 @@ $ peek
     GIT
     Branch: unix-support
     Status: CLEAN (staged: 0, unstaged: 0, untracked: 0)
-    Last commit: 384182e add disk command, --no-color support...
+    Last commit: 384182e add disk command, --no-color s...     
 
 
 └─────────                                           ─────────┘
