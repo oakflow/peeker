@@ -54,6 +54,7 @@ ${BOLD}Commands${RESET}:
   net            network info (IP, gateway, up/down speed)
   disk           free/used space per fixed drive
   git            git status for the current repo
+  update         pull the latest version of peek
   (none)         show everything above
 
 ${BOLD}Options${RESET}:
@@ -64,6 +65,33 @@ ${BOLD}Options${RESET}:
 
 EOF
         exit 0
+        ;;
+    update)
+        selfDir=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+        if [ -f "$selfDir/.peek-repo" ]; then
+            # dropped by install.sh - needed because `ln -s` silently falls
+            # back to a plain copy on Windows without symlink privilege
+            repoDir=$(cat "$selfDir/.peek-repo")
+        else
+            src="${BASH_SOURCE[0]}"
+            while [ -L "$src" ]; do
+                dir=$(cd -P "$(dirname "$src")" && pwd)
+                src=$(readlink "$src")
+                case "$src" in
+                    /*) ;;
+                    *) src="$dir/$src" ;;
+                esac
+            done
+            repoDir=$(cd -P "$(dirname "$src")" && pwd)
+        fi
+
+        if [ ! -d "$repoDir/.git" ]; then
+            echo "peek: can't find the peek git repo (expected it at $repoDir)" >&2
+            exit 1
+        fi
+        git -C "$repoDir" pull
+        exit $?
         ;;
 esac
 
