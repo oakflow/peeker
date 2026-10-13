@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 
+case "$(uname -s)" in
+    Linux*)               PLATFORM=linux ;;
+    Darwin*)              PLATFORM=macos ;;
+    MINGW*|MSYS*|CYGWIN*) PLATFORM=windows ;;
+    *)
+        echo "peek: unsupported OS ($(uname -s))" >&2
+        exit 1
+        ;;
+esac
+
 # --no-color can appear anywhere in the args, strip it out before anything
 # else looks at $1/$2 so it doesn't collide w subcommand/-x/count parsing
 
@@ -34,8 +44,8 @@ fi
 case "$1" in
     -h|--help|help)
         cat <<EOF
-        
-${BOLD}Usage${RESET}: 
+
+${BOLD}Usage${RESET}:
   peek [command] [options]
 
 ${BOLD}Commands${RESET}:
@@ -66,32 +76,12 @@ cat <<'EOF'
           .||      `|...  `|...  .|| \\.  `|...  .||.
 
 
-                                                      `-.
-                                                        .`
-                                                     _.`.`
-                                                 _.-` .`
-                                         ___.---` _.-`
-                                 __..---`___..---`
-                        _...--.-`   _.--`
-                    _.-`.-`.-`  _.-`
-                 .-` .`  .`   .`
-      .         /   /   /    /                    .
-      \`-.._    |  |    \    `.              _..-`/
-     .'-.._ ``--.._\     `. -- `.      _..-``  _..-`.
-     `_    _       `-. .`        `. .-`      _    _`
-       `.``           .            \          ``.`
-        `-.-'    _   .              :   _   `-.-`
-          `..-..'    ;       .` `.  '    `..-..`
-              /      .      : .-. : :        \
-              `._     \     ;( O ) /      _.`
-                 `-._.'`.    .`-'.' `._.-'
-                         `-....-`
-
-
-
 EOF
 
 barLength=20
+
+# internal border width for the git status output
+lineWidth=55
 
 # -x anywhere as second arg means "extra", show more detail/output for the command
 # a plain number as the second arg sets an exact count instaed
@@ -109,23 +99,70 @@ WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
 
 fetch_mem() {
-    powershell -NoProfile -Command '
+    case "$PLATFORM" in
+        windows)
+            powershell -NoProfile -Command '
 $os = Get-CimInstance Win32_OperatingSystem
 "{0}|{1}" -f $os.TotalVisibleMemorySize, $os.FreePhysicalMemory
 ' | tr -d '\r'
+            ;;
+        linux)
+            awk '
+                /^MemTotal:/     { total = $2 }
+                /^MemAvailable:/ { avail = $2 }
+                END              { print total "|" avail }
+            ' /proc/meminfo
+            ;;
+        macos)
+            local pageSize totalBytes totalKb freePages inactivePages freeKb
+            pageSize=$(sysctl -n hw.pagesize)
+            totalBytes=$(sysctl -n hw.memsize)
+            totalKb=$((totalBytes / 1024))
+            freePages=$(vm_stat | awk '/Pages free/ {gsub(/\./, "", $3); print $3}')
+            inactivePages=$(vm_stat | awk '/Pages inactive/ {gsub(/\./, "", $3); print $3}')
+            freeKb=$(( (freePages + inactivePages) * pageSize / 1024 ))
+            echo "${totalKb}|${freeKb}"
+            ;;
+    esac
 }
 
 fetch_sys() {
-    powershell -NoProfile -Command '
+    case "$PLATFORM" in
+        windows)
+            powershell -NoProfile -Command '
 $os = Get-CimInstance Win32_OperatingSystem
 $u = (Get-Date) - $os.LastBootUpTime
 $caption = $os.Caption -replace "Microsoft ", ""
 "{0}|{1}d {2}h {3}m" -f $caption, $u.Days, $u.Hours, $u.Minutes
 ' | tr -d '\r'
+            ;;
+        linux)
+            local caption uptimeSec days hours mins
+            caption=$(awk -F= '/^PRETTY_NAME=/ { gsub(/"/, "", $2); print $2 }' /etc/os-release)
+            uptimeSec=$(awk '{print int($1)}' /proc/uptime)
+            days=$((uptimeSec / 86400))
+            hours=$(((uptimeSec % 86400) / 3600))
+            mins=$(((uptimeSec % 3600) / 60))
+            echo "${caption}|${days}d ${hours}h ${mins}m"
+            ;;
+        macos)
+            local caption bootEpoch nowEpoch uptimeSec days hours mins
+            caption="macOS $(sw_vers -productVersion)"
+            bootEpoch=$(sysctl -n kern.boottime | sed -E 's/.*sec = ([0-9]+).*/\1/')
+            nowEpoch=$(date +%s)
+            uptimeSec=$((nowEpoch - bootEpoch))
+            days=$((uptimeSec / 86400))
+            hours=$(((uptimeSec % 86400) / 3600))
+            mins=$(((uptimeSec % 3600) / 60))
+            echo "${caption}|${days}d ${hours}h ${mins}m"
+            ;;
+    esac
 }
 
 fetch_net() {
-    powershell -NoProfile -Command '
+    case "$PLATFORM" in
+        windows)
+            powershell -NoProfile -Command '
 
     $ip = (Get-NetIPAddress -AddressFamily IPv4 |
             Where-Object { $_.IPAddress -notlike "169.254*" -and $_.InterfaceAlias -notmatch "Loopback" } |
@@ -146,18 +183,64 @@ fetch_net() {
     "$ip|$gw|$rx|$tx"
 
     '   | tr -d '\r'
+            ;;
+        linux)
+            local iface ip gw rx1 tx1 rx2 tx2 rx=0 tx=0
+            iface=$(ip route 2>/dev/null | awk '/^default/ {print $5; exit}')
+            ip=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+            gw=$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')
+            if [ -n "$iface" ]; then
+                read -r rx1 tx1 < <(awk -v i="${iface}:" '$1==i {print $2, $10}' /proc/net/dev)
+                sleep 1
+                read -r rx2 tx2 < <(awk -v i="${iface}:" '$1==i {print $2, $10}' /proc/net/dev)
+                rx=$(( rx2 - rx1 ))
+                tx=$(( tx2 - tx1 ))
+            fi
+            echo "${ip}|${gw}|${rx}|${tx}"
+            ;;
+        macos)
+            local iface ip gw rx1 tx1 rx2 tx2 rx=0 tx=0
+            iface=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')
+            if [ -n "$iface" ]; then
+                ip=$(ipconfig getifaddr "$iface" 2>/dev/null)
+                gw=$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2}')
+                read -r rx1 tx1 < <(netstat -ibn 2>/dev/null | awk -v i="$iface" '$1==i {print $7, $10; exit}')
+                sleep 1
+                read -r rx2 tx2 < <(netstat -ibn 2>/dev/null | awk -v i="$iface" '$1==i {print $7, $10; exit}')
+                rx=$(( rx2 - rx1 ))
+                tx=$(( tx2 - tx1 ))
+            fi
+            echo "${ip}|${gw}|${rx}|${tx}"
+            ;;
+    esac
 }
 
 fetch_processes() {
-    MSYS_NO_PATHCONV=1 tasklist /FO CSV /NH | sed 's/\([0-9]\),\([0-9]\)/\1\2/g'
+    case "$PLATFORM" in
+        windows)
+            MSYS_NO_PATHCONV=1 tasklist /FO CSV /NH |
+                sed 's/\([0-9]\),\([0-9]\)/\1\2/g' |
+                awk -F',' '{ gsub(/"/, "", $1); gsub(/[^0-9]/, "", $5); print $1 "|" $5 }'
+            ;;
+        linux|macos)
+            ps -eo comm=,rss= | awk '{ rss = $NF; $NF = ""; name = $0; gsub(/^ +| +$/, "", name); print name "|" rss }'
+            ;;
+    esac
 }
 
 fetch_disk() {
-    powershell -NoProfile -Command '
+    case "$PLATFORM" in
+        windows)
+            powershell -NoProfile -Command '
 Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
     "{0}|{1}|{2}" -f $_.DeviceID, $_.Size, $_.FreeSpace
 }
 ' | tr -d '\r'
+            ;;
+        linux|macos)
+            df -k 2>/dev/null | awk 'NR>1 && $1 ~ /^\/dev\// { print $6 "|" ($2*1024) "|" ($4*1024) }'
+            ;;
+    esac
 }
 
 # only kick off the data gathering a given view actually needs, and run it
@@ -203,9 +286,9 @@ if $need_mem; then
     [ "$percentage" -ge 85 ] && barColor=$RED
 
     # group by process name and sum memory across all instances of that name
-    memUsage=$(awk -F',' '{
-            gsub(/"/, "", $1); gsub(/[^0-9]/, "", $5)
-            mem[$1] += $5 / 1024
+    # (fetch_processes already normalizes each platform's output to name|memKB)
+    memUsage=$(awk -F'|' '{
+            mem[$1] += $2 / 1024
             count[$1]++
         }
         END {
@@ -309,7 +392,16 @@ gitstatus() {
     echo "Branch: $branch"
     echo "Status: ${statusColor}${statusWord}${RESET} (staged: $staged, unstaged: $unstaged, untracked: $untracked)"
     last=$(git log -1 --format='%h %s (%cr)' 2>/dev/null)
-    [ -n "$last" ] && echo "Last commit: $last"
+    if [ -n "$last" ]; then
+        local prefix="Last commit: " maxLen
+        maxLen=$((lineWidth - ${#prefix}))
+
+        if [ "${#last}" -gt "$maxLen" ]; then
+            last="${last:0:$((maxLen - 3))}..."
+        fi
+
+        echo "${prefix}${last}"
+    fi
 }
 
 case "$1" in
